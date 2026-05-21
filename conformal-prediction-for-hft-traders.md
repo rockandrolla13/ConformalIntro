@@ -43,6 +43,16 @@ mind_map_priority: high
 
 # Conformal Prediction for Algorithmic and HFT Traders
 
+> **TL;DR — what you, an algo/HFT trader, get out of this page.**
+>
+> You ship models that predict things (next mid move, pre-trade slippage, fill probability, basket residual). Your risk system wants *intervals*. Conformal prediction (CP) is the thinnest possible wrapper that converts the first into the second, and it gives you three things you currently don't have:
+>
+> 1. **Coverage that holds out-of-sample, distribution-free.** When the 90% band says 90%, the test set delivers 90% — without assuming Gaussian residuals or stable regimes. In the regime-shift sim below, the parametric interval collapses to **48% coverage** after a 5× vol spike; ACI recovers to **90.0%** within a few hundred steps.
+> 2. **Width that breathes with the regime.** σ̂-scaled or CQR-style intervals widen automatically in stressed minutes and tighten when calm — directly usable for quote skew, inventory limits, slippage budgets, and Kelly sizing. No more `μ ± 1.645σ` with a stale σ from last week.
+> 3. **Auditability.** Every interval traces back to (calibration set, base model, score function, α level). A risk officer or regulator can verify it line-for-line. *"The neural net is 92% confident"* is unverifiable; CP isn't.
+>
+> **You don't replace your XGBoost / LightGBM / NN. You wrap it** — typically ~50 lines of calibration code. The rest of this page is the recipe (§1–3), three trading-specific use cases (§4), the time-series fixes (§5), the tree+CP stack (§6), and three reproducible simulations you can run today (§7).
+
 Practitioner's guide for quants who already trust XGBoost, GBM, and rolling quantiles. The pitch is short. Wrap a [[concepts/conformal-prediction|conformal prediction (CP)]] layer around your existing model, and the 90% prediction interval you quote will actually contain the truth 90% of the time on out-of-sample data. That holds on the non-stationary, vol-clustered, regime-switching data you actually trade.
 
 ## Who this is for
