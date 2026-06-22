@@ -1,0 +1,23 @@
+The model learns from past RFQs by treating each one as an experiment: it records the market context, your quote, whether you won, and the bond’s later clean value. From this history it learns two linked relationships: how changing the quote changes the probability of winning, and what the expected post-trade edge is conditional on winning at that quote. Your private mid is only the pre-RFQ forecast of that later value; winning may reveal that the client knew something, so the forecast is updated after conditioning on the win. For a new RFQ, the model tests several possible quotes and computes
+
+Expected value of quote q=
+learned fill probability
+P(win at q∣x)
+	​
+
+	​
+
+×
+learned edge if that same quote wins
+(E[Y
+H
+	​
+
+−q∣win at q,x]−inventory and trading costs)
+	​
+
+	​
+
+.
+
+It chooses the quote with the highest expected value, or does not respond if all quotes have negative value. After the result and later markout are observed, that RFQ becomes another training example. Thus, the model does not separately predict a fill probability and then assume your original theoretical edge survives; it learns both probability and realized edge from the same win event. Your original framework already supplies the contextual fill-curve and risk inputs, while the hit-ratio paper supplies the control logic for converting those learned inputs into state-dependent quotes.
