@@ -1,0 +1,144 @@
+# RFQ Auto-Quoter & OMS — Functional Spec (v2, Proposed)
+
+> **Scope of this document.** This is a *capability* specification: what the system must **do**, the data it must hold, and the surfaces it must expose. It deliberately contains **no modelling decisions** — estimator choices, signal construction, and pricing math live in a separate quant spec (see §8, Out of Scope).
+
+---
+
+## 1. Vision & Target Workflow
+
+The engine **quotes by default**; the trader **supervises, overrides, and tunes guards** rather than clicking per inquiry.
+
+Perfect-state loop:
+
+1. RFQs flow into the UI in real time across the full whitelisted universe.
+2. The pricing engine generates levels for every in-universe RFQ it has enough information to price.
+3. The trader confirms levels and guards once, then turns on auto-quote with **one click**.
+4. The responder decides which RFQs to answer, sends levels, and **re-quotes without trader intervention**.
+5. The trader monitors, intervenes on exceptions, diagnoses misses, and improves the engine.
+
+The same one-stop interface must also carry **make + take + sweeps** (send RFQs, take liquidity, run other protocols) — not just passive response.
+
+---
+
+## 2. System Components
+
+| Component | Role |
+|---|---|
+| **RFQ Responder / Auto-Quoter** | Decides whether to answer each live RFQ; sends and updates levels under cadence rules. |
+| **Pricing Engine** | Produces a level, an edge, a fill-likelihood, and a **confidence** per inquiry. |
+| **Risk-Gate Layer** | Hard gate, *separate from pricing*. Single-name guards **plus** aggregate in-flight budget **plus** hedge-capacity checks. |
+| **Signals / Market-Data Layer** | Feeds the engine: TRACE prints, dealer runs/axes, ECN stack, BBG runs, issuer equity, ETF flow → one **consolidated market-pressure signal**. |
+| **Hedging Interface** | Exposes current hedge capacity and cost (CDX / ETF / duration) to the engine. |
+| **Trader Dashboard** | Always-on surface: blotter, per-inquiry detail, overrides, bias/protection toggles, lineage. |
+| **OMS** | **Event-sourced system of record.** The spine both responder and dashboard read from; replayable. |
+
+---
+
+## 3. Original Capabilities (baseline — carried forward)
+
+These exist in the current design and **must be preserved**.
+
+**Response / auto-quoter**
+- Auto-respond toggle across the desired universe (whole whitelist → autoquote, no click-per-inquiry).
+- Respond/pull quotes from a single dash-style surface carrying all relevant bond information.
+- All accessible RFQs flow through; **no per-bond filtering** unless out-of-universe / not approved.
+- **Centralized do-not-quote rule set**, evaluated as a final step (stock move, intraday move, earnings flag, missing ECN side, low amount outstanding, liquidity threshold, size threshold, position-post-trade threshold, lowest-alpha quintile, settlement edge cases, etc.).
+- **Explainability**: ability to state plainly *why* an RFQ did not get auto-quoted.
+- **Manual level override** per inquiry.
+- **Toggleable bias**: uniform wider ↔ more aggressive (price up/down on bid, offer side; at universe, grid, and ISIN level).
+- **Toggleable protections**: don't quote through ECN, don't quote through dealer, off-market TRACE-print protection (bid/offer amounts in cents or spread).
+- **1-click off per bond** on bid / offer / both — persist permanent or reset daily.
+- **In-flight controls**: time remaining to respond, killswitch to pull responded levels, live level update.
+- **Cadence**: *ASAP* (respond instantly, re-quote on ≥ 1c move) and *Binned* (price as close to due time as possible, pull if FV moves beyond threshold).
+
+**Trade-flow surface**
+- Staged flow: Universe Live → Engine Prices → Trader Sanity Check → Auto-Respond.
+- Trader dashboard contents: live RFQ blotter with status, per-inquiry inputs, manual override / pull, do-not-quote toggles, bias control, protections, **RFQ-ID → full input lineage**.
+
+**OMS / diagnostics**
+- Live RFQs blotter (valid-until, time, feedcode, ISIN/CUSIP/ticker, position, state, workflow, side, size, price type, traded status, universe count).
+- Per-CUSIP/ISIN **drill-down**: TRACE prints, ECN stack, dealer quotes, BBG dealer runs.
+- Searching a CUSIP surfaces all historical inquiry/trades and reference-price history.
+- **API next step (in parallel)**: send RFQs and take liquidity via API from the same surface — set size/direction, pick venue/protocol, receive quotes in-UI, compare vs mid, trade/pass/counter.
+
+---
+
+## 4. Improvements (new capability deltas)
+
+Stated as **requirements**, not models.
+
+### 4.1 Adverse-selection-aware pricing
+Quotes must reflect that **winning a competitive RFQ is informative** — the engine prices defensively against being picked off, rather than treating edge as a fixed add-on to a reference mid.
+
+### 4.2 Confidence-driven spread sizing
+The engine must attach a **confidence** to every quote and **widen when confidence is low, tighten when high**. The current "reference price missing → refuse to quote" behavior becomes a **graded** gate: price with an explicit uncertainty that both *gates* and *sizes* the spread.
+
+### 4.3 Continuous inventory skew (replace the threshold veto)
+Position must drive a **continuous skew** — more aggressive on the offsetting side, progressively backing off as the limit approaches — instead of a hard "≥ X mm → stop quoting" cliff. The position limit becomes a **soft penalty**, not a wall. `MFS-Desire` becomes a *driver* of skew, not just a displayed column.
+
+### 4.4 Aggregate in-flight risk budget
+A live **exposure budget across the entire set of currently-open quotes** (sector, rating bucket, spread DV01, HY beta), so correlated names resolving in the same binned/auction window cannot collectively breach portfolio risk. Quotes are **auto-widened or pulled** as the budget fills.
+
+### 4.5 System-level circuit breakers
+Beyond per-quote clamps: **desk-level breakers** that trip on anomalous behavior (e.g. abnormal off-market-clamp rate, abnormal quote/cancel rate). A protection that fires constantly is itself an upstream-fault signal.
+
+### 4.6 Hedge-aware quoting
+Willingness to quote, and how tightly, must depend on **current hedge capacity and marginal hedge cost** (CDX / ETF / duration). The existing ETF rails feed the RFQ skew so the quoter tightens when risk can be laid off cheaply.
+
+### 4.7 Drift-aware skew (consolidated pressure signal)
+The engine consumes a **single consolidated market-pressure signal** (fusing TRACE pressure, dealer-run/axe imbalance, issuer equity, ETF flow) and skews toward the **predicted short-horizon move** over the quote's live window.
+
+### 4.8 List / portfolio pricing with netting
+Pricing a **list coherently** so buys offset sells and the aggregate required edge is **below sum-of-parts**, rather than pricing each RFQ in isolation.
+
+### 4.9 Counterparty-aware skew
+Track **per-counterparty behavior** (do their fills predict adverse moves?) and skew per name. The current star-rating is the seed of this.
+
+### 4.10 Make/take co-optimization
+The responder's quote can account for whether the engine can likely **take** the same name cheaply — make/take is an **input to the quote**, not just a side feature.
+
+---
+
+## 5. Data & Storage Requirements
+
+The OMS must persist, immutably and timestamped:
+
+- Every **RFQ** (full inbound payload) and every **quote version** sent.
+- Every **guard evaluation** and **do-not-quote decision** (with the reason).
+- Every **parameter / bias / protection change**, attributed.
+- **Cover and outcome data** for every inquiry (won / lost / done-away / timed-out, and where it traded).
+- **RFQ-ID → full input lineage** retrievable on demand.
+
+Where venues don't report price/spread, the system should **match RFQ data to TRACE** to reconstruct levels.
+
+---
+
+## 6. Architecture Requirement — Event-Sourced Spine
+
+- The OMS is the **event store and single system of record**; the responder and dashboard are **readers** of it.
+- Every RFQ, quote, guard evaluation, and parameter change is an **immutable event**.
+- This enables **replay**: historical flow can be re-run against any candidate pricing/guard/parameter configuration, so **every dial is backtestable**.
+- This also **collapses today's fragmentation** (separate responder UI, credit2025, Credit-OMS, dash app) onto one spine.
+- *Note:* this is effectively impossible to retrofit onto a snapshot-state OMS later — it is a day-one decision.
+
+---
+
+## 7. Surfaces / UI Requirements
+
+- **Always-on trader dashboard**: live blotter + status, per-inquiry inputs (edge · fill-likelihood · ref-mid · confidence), manual override / pull, do-not-quote toggles, bias (wider ↔ aggressive), protections (ECN / dealer / off-market TRACE), RFQ-ID → lineage.
+- **Per-CUSIP drill-down**: TRACE prints, ECN stack, dealer quotes, BBG runs, reference-price history.
+- **Diagnostics**: trade hit-rates and volume/count over time by sector / rating; clear "why not AQ-ed" explanations; ability to grab an RFQ-ID and inspect its full inputs.
+- Everything routed through **one dash-class interface** (the legacy single-inquiry responder UI is too inflexible to be the primary surface).
+
+---
+
+## 8. Out of Scope (owned in the quant / modelling spec)
+
+Explicitly **not** specified here, by design:
+
+- How fill-likelihood, conditional fair value, or confidence are **estimated**.
+- How the consolidated market-pressure signal is **constructed**.
+- The functional form of inventory skew, hedge cost, or counterparty toxicity.
+- Any pricing math, calibration method, or statistical estimator.
+
+This spec defines the **contract** those models must satisfy (inputs available, outputs required, where they plug in) — not the models themselves.
