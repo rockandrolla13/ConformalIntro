@@ -1,0 +1,92 @@
+# RFQ Auto-Quoter & OMS — Capability Review
+
+**Subject:** Systematic credit RFQ responder + system-of-record OMS
+**Design under review:** Move from rigid single-inquiry "One Ring" responder → *engine-quotes-by-default*, trader supervises / overrides / tunes guards.
+
+---
+
+## Verdict (one line)
+
+The **workflow philosophy and operability design are strong** and the big strategic bet is called correctly. Almost every real gap is in the **quantitative core** — fill / adverse-selection modeling, inventory as continuous control, aggregate in-flight risk, hedging, and short-horizon drift. Those are the parts that actually determine PnL and that would let the desk stay ahead.
+
+---
+
+## 1. What's Strong — Protect These
+
+- **The supervise-don't-drive inversion.** Whitelist universe → auto-quote, trader as risk manager / diagnostician. This is exactly where the market is heading and is the single most important call in the design.
+- **Explainability & lineage as first-class requirements.** "Why didn't this get AQ-ed" and `RFQ-ID → full-input-lineage` are what make an auto-quoter *improvable* rather than merely operable.
+- **Storing everything, including covers.** The answer to the doc's own open question ("do we store covers?") is an emphatic **yes** — cover data is the most valuable and most perishable asset on the desk.
+- **Risk-officer layer as a hard gate, separate from pricing.** Aarish is right: this separation is the thing you miss most when it's absent.
+- **Correct atomic choices already present:** cadence-aware logic (ASAP re-quote on ≥ 1c vs binned-near-due with FV-move pull) and the per-CUSIP historical surface.
+
+---
+
+## 2. Where It's Weak — The Quantitative Core
+
+### 2.1 The fill model is the crown jewel — and it's treated as an exogenous input
+
+`p(win)`, `expected edge`, `alpha`, `holding cost` appear as **independent additive dials**. The correct object is a **single optimization**. If bidding `b` to *buy*:
+
+$$
+\mathbb{E}[\pi(b)] \;=\; P(\text{win} \mid b)\cdot\Big(\, \mathbb{E}[V \mid \text{win}, b] \;-\; b \;-\; c_{\text{inv}} \;-\; c_{\text{hedge}} \,\Big)
+$$
+
+Two things this makes explicit that the sketch does not:
+
+- **Winner's curse.** Conditional on winning, fair value is *worse* than unconditional:
+  $$\mathbb{E}[V \mid \text{win}, b] < \mathbb{E}[V]$$
+  You won by being the most aggressive — and often because flow is pushing your way. A skew computed off `ref_mid + fixed edge` systematically **overbids**. Skew should depend on the **adverse-selection gradient**, not a constant.
+- **Edge is an output, not a dial.** The optimal `b*` is a function of the **shape** of the fill curve and the **marginal inventory cost**.
+
+**Conformal layer (where the UQ research earns its keep).** `P(win | b)` and `E[V | win, b]` are calibrated conditional estimates from **censored, non-exchangeable** data: done-away gives almost no level information; RFQ flow is autocorrelated and regime-dependent. Calibrated intervals let you **size spread by interval width** — widen when uncertain, tighten when confident — the principled version of the "data-quality → widen" heuristic.
+
+> The logs' `reference price missing → refuse to quote` behavior should become a **graded mid-with-uncertainty** that gates *and* sizes, not a binary fail.
+
+### 2.2 Inventory skew should be continuous optimal control, not a threshold veto
+
+`position post-trade ≥ 5mm or ≤ −5mm → don't quote` is a **cliff**: normal quoting → nothing. It is both exploitable and leaves edge on the table.
+
+- `MFS-Desire` is shown as a *column* — it should **drive a continuous skew** (Avellaneda–Stoikov-flavored, but bespoke to credit's hedge imperfection): more aggressive on the offsetting side, backing off as the limit approaches.
+- The position limit becomes a **soft penalty**, not a wall.
+
+### 2.3 Aggregate in-flight risk is missing — a genuine blowup vector
+
+Every guard in the design is **single-name / single-RFQ**. But in binned / auction protocols, **many correlated names are live simultaneously** and resolve in the same ~30s window. You can get hit on ten same-sector names and blow through portfolio risk before any per-name guard fires.
+
+- Add an **in-flight aggregate exposure budget** across the currently-live quote set: sector, rating bucket, spread DV01, HY beta. Pull / widen quotes as the budget fills.
+- If off-market protection is **firing frequently**, that is itself a signal something upstream is broken → add a **system-level circuit breaker on anomalous clamp rate**, not just per-quote clamps.
+
+### 2.4 Hedging is entirely absent from a market-making system
+
+- Willingness to quote should depend on **current hedge capacity** and **marginal hedge cost** (CDX / HYG–JNK / duration).
+- The residual **un-hedgeable basis** is what should price $c_{\text{inv}}$.
+- ETF rails already exist (the `NEAT_BATS` / `SPHY` / `JNK` arb side). The gap is **wiring that into the RFQ skew** so the quoter tightens when it can lay off risk cheaply.
+
+---
+
+## 3. Where to Push to Stay Ahead
+
+| # | Capability | Why it differentiates |
+|---|-----------|----------------------|
+| 1 | **Short-horizon drift signal** | Nothing predicts the ref-price move over the quote's live horizon and skews for it. This is the Petit-et-al. corporate-bond trade-flow decomposition: fuse TRACE print pressure + dealer-run/axe imbalance + issuer equity + ETF flow into one consolidated pressure signal, skew toward predicted drift. Most genuinely differentiating build — and the research already exists. |
+| 2 | **Event-sourced, replayable architecture** | The meta-capability. Every RFQ, quote version, guard evaluation, and param change as an immutable timestamped event → **replay** historical flow against any candidate config. Every dial becomes backtestable. Also resolves the One-Ring / credit2025 / Credit-OMS / Dash fragmentation. Bolt logging onto a snapshot OMS and you can never answer counterfactuals. |
+| 3 | **Portfolio / list pricing with netting** | Already in the MarketList / binned world. Pricing a *list* coherently — buys offset sells, aggregate risk (and required edge) below sum-of-parts — is where the volume and edge are going. Single-RFQ pricing leaves netting alpha on the table. |
+| 4 | **Per-counterparty toxicity** | Model whether a counterparty's fills predict adverse moves; skew per name. Star-rating is the nascent version of this. |
+| 5 | **Make/take co-optimization** | The "send RFQs / take liquidity" track is more than convenience: if the engine knows it can likely *take* a name cheaply, it can *make* tighter. Elevate from side feature to **input into the quoter**. |
+
+---
+
+## 4. Priority & Sequencing
+
+**Highest-leverage move = §2.1 + §3.2 (replay).**
+
+1. Turn the fill / adverse-selection model into the calibrated optimization in §2.1 (with the conformal interval-width → spread-sizing layer).
+2. Build the **event store** so every parameter can be proven against history.
+
+Everything else compounds off those two: continuous inventory control (§2.2), in-flight aggregate risk (§2.3), and hedge wiring (§2.4) all plug into the §2.1 optimization; drift (§3.1), netting (§3.3), toxicity (§3.4), and make/take (§3.5) all become testable once the replay spine (§3.2) exists.
+
+---
+
+### Architecture note
+
+Build the **OMS as the event store / system-of-record spine** that both the responder and the dashboard read from. This is the single structural decision that (a) resolves the current multi-app fragmentation, (b) makes the whole stack backtestable, and (c) is effectively impossible to retrofit onto a snapshot-state OMS later.
